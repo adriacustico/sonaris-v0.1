@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest --tb=short -q)",
+      "Bash(python3 -m pytest --tb=short -q)",
+      "Bash(pip3 list *)",
+      "Read(//usr/**)",
+      "Read(//home/**)",
+      "Read(//opt/**)",
+      "Read(//home/adrian/.local/bin/**)",
+      "Read(//home/adrian/**)",
+      "Bash(docker exec *)"
+    ]
+  }
+}
