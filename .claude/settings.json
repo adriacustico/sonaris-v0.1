@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec sonaris-backend pytest *)",
+      "Bash(docker exec sonaris-frontend npm run typecheck)",
+      "Bash(docker exec sonaris-postgres psql *)"
+    ]
+  }
+}

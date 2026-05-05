@@ -41,14 +41,23 @@ class CalculationRequest(BaseModel):
     nombre: str
     materiales: list[MaterialInput]
     frecuencias: list[float] | None = None
+    # Double-leaf parameters (optional; ignored for single-wall calculations)
+    separacion_mm: float | None = Field(None, ge=0, description="Cavity depth in mm (double-leaf mode)")
+    tipo_union: str = Field("montantes_metal", description="Union type: rigida | montantes_metal | montantes_madera | canal_resiliente | aire")
+    tiene_relleno: bool = Field(False, description="True when the cavity contains porous fill")
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "proyecto_id": 1,
-                "nombre": "Muro principal",
-                "materiales": [{"nombre": "Hormigon 200mm", "espesor": 0.2}],
-                "frecuencias": [125, 250, 500, 1000, 2000, 4000],
+                "nombre": "Tabique Metalcon doble hoja",
+                "materiales": [
+                    {"nombre": "Placa yeso 15mm", "espesor": 0.015},
+                    {"nombre": "Placa yeso 15mm", "espesor": 0.015},
+                ],
+                "separacion_mm": 90,
+                "tipo_union": "montantes_metal",
+                "tiene_relleno": True,
             }
         }
     }
@@ -72,9 +81,13 @@ def create_calculation(req: CalculationRequest, db: Session = Depends(get_db)) -
     """Create, persist and return an acoustic calculation."""
     logger.info("POST /calculations: %s", req.nombre)
     try:
+        separacion_m = req.separacion_mm / 1000.0 if req.separacion_mm else None
         R_frecuencias = engine.calcular_aislamiento(
             materiales=[material.model_dump() for material in req.materiales],
             frecuencias=req.frecuencias,
+            separacion_m=separacion_m,
+            tipo_union=req.tipo_union,
+            tiene_relleno=req.tiene_relleno,
         )
         ponderacion = engine.ponderacion_iso717_1(R_frecuencias)
         resultado = {
