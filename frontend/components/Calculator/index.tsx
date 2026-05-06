@@ -10,13 +10,22 @@ interface CatalogoMaterial {
   nombre: string;
   densidad: number;
   tipo: string;
+  categoria: string;
 }
 
-interface CapaItem {
+interface PanelLayer {
   nombre: string;
   densidad: number;
   tipo: string;
-  espesorMm: number;
+  espesorUnitarioMm: number;
+  cantidad: number;
+}
+
+interface UnionConfig {
+  rellenoNombre: string | null;
+  rellenoEspesorMm: number;
+  camaraAireMm: number;
+  tipoMontantes: string;
 }
 
 interface Resultado {
@@ -26,32 +35,35 @@ interface Resultado {
   R_frecuencias: Record<string, number>;
 }
 
-type ApiMaterial = {
-  nombre: string;
-  densidad: number;
-  tipo?: string;
-  tipo_material?: string;
-  tipoMaterial?: string;
-};
-
-type TipoUnion = "rigida" | "montantes_metal" | "montantes_madera" | "canal_resiliente" | "aire";
-
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const FALLBACK_MATERIALES: CatalogoMaterial[] = [
-  { nombre: "Hormigon 200mm", densidad: 2400, tipo: "rigido" },
-  { nombre: "Ladrillo ceramico 120mm", densidad: 1800, tipo: "rigido" },
-  { nombre: "Yeso + papel 13mm", densidad: 900, tipo: "rigido" },
-  { nombre: "Vidrio 6mm", densidad: 2500, tipo: "rigido" },
-  { nombre: "Lana mineral 50mm", densidad: 30, tipo: "poroso" },
-  { nombre: "Lana de roca 70mm", densidad: 70, tipo: "poroso" },
-  { nombre: "Doble vidrio 4-12-4", densidad: 800, tipo: "composite" },
-  { nombre: "Tabique metalcon doble placa", densidad: 520, tipo: "composite" },
+const FALLBACK_RIGID: CatalogoMaterial[] = [
+  { nombre: "Placa yeso 15mm",        densidad: 850,  tipo: "rigido",    categoria: "rigid" },
+  { nombre: "OSB 15mm",               densidad: 620,  tipo: "rigido",    categoria: "rigid" },
+  { nombre: "Hormigon 200mm",         densidad: 2400, tipo: "rigido",    categoria: "rigid" },
+  { nombre: "Ladrillo ceramico 120mm",densidad: 1800, tipo: "rigido",    categoria: "rigid" },
+  { nombre: "Fibrocemento 10mm",      densidad: 1350, tipo: "rigido",    categoria: "rigid" },
+  { nombre: "Contrachapado 18mm",     densidad: 600,  tipo: "rigido",    categoria: "rigid" },
+];
+
+const FALLBACK_FILLING: CatalogoMaterial[] = [
+  { nombre: "Lana mineral 50mm",   densidad: 30,  tipo: "poroso", categoria: "filling" },
+  { nombre: "Lana de vidrio 50mm", densidad: 25,  tipo: "poroso", categoria: "filling" },
+  { nombre: "Lana de roca 70mm",   densidad: 70,  tipo: "poroso", categoria: "filling" },
+  { nombre: "Espuma acustica 25mm",densidad: 40,  tipo: "poroso", categoria: "filling" },
 ];
 
 const FRECUENCIAS_CHART = [125, 200, 315, 500, 800, 1250, 2000, 3150, 5000];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const OPCIONES_MONTANTES = [
+  { value: "montantes_metal",  label: "Metal (Metalcon)" },
+  { value: "montantes_madera", label: "Madera" },
+  { value: "canal_resiliente", label: "Canal resiliente" },
+  { value: "rigida",           label: "Rígida (sin cavidad)" },
+  { value: "aire",             label: "Flotante (sin contacto)" },
+];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function defaultEspesorMm(nombre: string): number {
   const m = nombre.match(/(\d+(?:[.,]\d+)?)\s*mm/i);
@@ -63,29 +75,30 @@ function apiUrl(path: string): string {
   return base ? `${base}${path}` : path;
 }
 
-function normalizarMaterial(m: ApiMaterial): CatalogoMaterial {
-  return {
-    nombre: m.nombre,
-    densidad: m.densidad,
-    tipo: m.tipoMaterial ?? m.tipo_material ?? m.tipo ?? "rigido",
-  };
-}
-
 function abreviarFrecuencia(hz: number): string {
-  if (hz >= 1000) return `${hz / 1000}k`;
-  return String(hz);
+  return hz >= 1000 ? `${hz / 1000}k` : String(hz);
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── EsquemaTabique ───────────────────────────────────────────────────────────
 
-function EsquemaTabique({ capas }: { capas: CapaItem[] }): JSX.Element {
+function EsquemaTabique({
+  capa1,
+  union,
+  capa2,
+}: {
+  capa1: PanelLayer[];
+  union: UnionConfig;
+  capa2: PanelLayer[];
+}): JSX.Element {
   const SVG_H = 160;
   const LABEL_H = 36;
-  const MIN_W = 22;
-  const MAX_TOTAL_W = 260;
-  const GAP = 3;
+  const MAX_W = 280;
+  const GAP = 2;
+  const MIN_W = 8;
 
-  if (capas.length === 0) {
+  const hasContent = capa1.length > 0 || capa2.length > 0;
+
+  if (!hasContent) {
     return (
       <div className="flex h-48 items-center justify-center text-sm text-slate-400">
         Añade materiales para ver el esquema
@@ -93,84 +106,82 @@ function EsquemaTabique({ capas }: { capas: CapaItem[] }): JSX.Element {
     );
   }
 
-  const totalMm = capas.reduce((s, c) => s + c.espesorMm, 0);
-  const available = MAX_TOTAL_W - GAP * (capas.length - 1);
+  // Build a list of "sections" (left-to-right)
+  type Section = { label: string; mm: number; fill: string; stroke: string; pattern?: string };
+  const sections: Section[] = [];
+
+  for (const l of capa1) {
+    sections.push({
+      label: l.nombre.replace(/\s+\d+mm$/i, "").slice(0, 12),
+      mm: l.espesorUnitarioMm * l.cantidad,
+      fill: "url(#hatch-rigid)",
+      stroke: "#64748b",
+    });
+  }
+
+  const totalCavidad = (union.rellenoNombre ? union.rellenoEspesorMm : 0) + union.camaraAireMm;
+  if (totalCavidad > 0) {
+    const lbl = union.rellenoNombre
+      ? union.rellenoNombre.replace(/\s+\d+mm$/i, "").slice(0, 12)
+      : "Cámara aire";
+    sections.push({
+      label: lbl,
+      mm: totalCavidad,
+      fill: union.rellenoNombre ? "#e2e8f0" : "none",
+      stroke: "#94a3b8",
+    });
+  }
+
+  for (const l of capa2) {
+    sections.push({
+      label: l.nombre.replace(/\s+\d+mm$/i, "").slice(0, 12),
+      mm: l.espesorUnitarioMm * l.cantidad,
+      fill: "url(#hatch-rigid)",
+      stroke: "#64748b",
+    });
+  }
+
+  const totalMm = sections.reduce((s, x) => s + x.mm, 0);
+  const available = MAX_W - GAP * (sections.length - 1);
   const scale = Math.min(1, available / Math.max(totalMm, 1));
+  const widths = sections.map((s) => Math.max(MIN_W, s.mm * scale));
+  const totalW = widths.reduce((a, b) => a + b, 0) + GAP * (sections.length - 1);
+  const startX = (MAX_W - totalW) / 2 + 4;
 
-  const widths = capas.map((c) => Math.max(MIN_W, c.espesorMm * scale));
-  const totalW = widths.reduce((s, w) => s + w, 0) + GAP * (capas.length - 1);
-  const svgW = Math.max(totalW + 8, 120);
-
-  const fillColor = (tipo: string): string => {
-    if (tipo === "poroso") return "#e2e8f0";
-    if (tipo === "composite") return "#cbd5e1";
-    return "url(#hatch-rigido)";
-  };
-
-  const strokeColor = (tipo: string): string => {
-    if (tipo === "poroso") return "#94a3b8";
-    return "#64748b";
-  };
-
-  const startX = (svgW - totalW) / 2;
   const positions = widths.map((w, i) => ({
-    x: startX + widths.slice(0, i).reduce((s, v) => s + v, 0) + GAP * i,
+    x: startX + widths.slice(0, i).reduce((a, b) => a + b, 0) + GAP * i,
     w,
   }));
 
   return (
     <svg
-      viewBox={`0 0 ${svgW} ${SVG_H + LABEL_H}`}
-      className="mx-auto h-auto w-full max-w-[300px]"
-      aria-label="Esquema de sección transversal del tabique"
+      viewBox={`0 0 ${MAX_W + 8} ${SVG_H + LABEL_H}`}
+      className="mx-auto h-auto w-full max-w-[320px]"
+      aria-label="Sección transversal del tabique"
     >
       <defs>
-        <pattern
-          id="hatch-rigido"
-          width="6"
-          height="6"
-          patternUnits="userSpaceOnUse"
-          patternTransform="rotate(45)"
-        >
+        <pattern id="hatch-rigid" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="6" stroke="#94a3b8" strokeWidth="1.5" />
         </pattern>
       </defs>
 
-      {capas.map((capa, i) => {
+      {sections.map((sec, i) => {
         const { x, w } = positions[i];
-        const labelX = x + w / 2;
-        const base = capa.nombre.replace(/\s+\d+mm$/i, "");
-        const nombreCorto = base.length > 14 ? base.slice(0, 13) + "…" : base;
-
         return (
-          <g key={`${capa.nombre}-${i}`}>
+          <g key={`${sec.label}-${i}`}>
             <rect
-              x={x}
-              y={0}
-              width={w}
-              height={SVG_H}
-              fill={fillColor(capa.tipo)}
-              stroke={strokeColor(capa.tipo)}
+              x={x} y={0} width={w} height={SVG_H}
+              fill={sec.fill}
+              stroke={sec.stroke}
               strokeWidth={1}
+              strokeDasharray={sec.fill === "none" ? "4 3" : undefined}
               rx={2}
             />
-            <text
-              x={labelX}
-              y={SVG_H + 14}
-              textAnchor="middle"
-              className="fill-slate-600"
-              fontSize={9}
-            >
-              {nombreCorto}
+            <text x={x + w / 2} y={SVG_H + 14} textAnchor="middle" className="fill-slate-600" fontSize={8}>
+              {sec.label}
             </text>
-            <text
-              x={labelX}
-              y={SVG_H + 26}
-              textAnchor="middle"
-              className="fill-slate-400"
-              fontSize={8}
-            >
-              {capa.espesorMm} mm
+            <text x={x + w / 2} y={SVG_H + 26} textAnchor="middle" className="fill-slate-400" fontSize={7}>
+              {sec.mm} mm
             </text>
           </g>
         );
@@ -179,137 +190,84 @@ function EsquemaTabique({ capas }: { capas: CapaItem[] }): JSX.Element {
   );
 }
 
-function GraficoR({
-  data,
-}: {
-  data: Array<{ frecuencia: number; valor: number }>;
-}): JSX.Element {
-  const ML = 44;
-  const MR = 16;
-  const MT = 20;
-  const MB = 36;
-  const W = 520;
-  const H = 220;
-  const innerW = W - ML - MR;
-  const innerH = H - MT - MB;
-  const Y_MAX = 100;
+// ─── GraficoR ─────────────────────────────────────────────────────────────────
+
+function GraficoR({ data }: { data: Array<{ frecuencia: number; valor: number }> }): JSX.Element {
+  const ML = 44; const MR = 16; const MT = 20; const MB = 36;
+  const W = 520; const H = 200;
+  const innerW = W - ML - MR; const innerH = H - MT - MB;
+  const F_MIN = 100; const F_MAX = 5000; const Y_MAX = 100;
   const Y_TICKS = [0, 25, 50, 75, 100];
-  const F_MIN = 100;
-  const F_MAX = 5000;
 
-  const xPos = (hz: number): number =>
+  const xPos = (hz: number) =>
     ML + ((Math.log10(hz) - Math.log10(F_MIN)) / (Math.log10(F_MAX) - Math.log10(F_MIN))) * innerW;
-
-  const yPos = (db: number): number =>
-    MT + innerH - (db / Y_MAX) * innerH;
+  const yPos = (db: number) => MT + innerH - (db / Y_MAX) * innerH;
 
   const linePath = data.length < 2
     ? ""
-    : data
-        .map((p, i) => `${i === 0 ? "M" : "L"} ${xPos(p.frecuencia).toFixed(1)} ${yPos(p.valor).toFixed(1)}`)
-        .join(" ");
+    : data.map((p, i) => `${i === 0 ? "M" : "L"} ${xPos(p.frecuencia).toFixed(1)} ${yPos(p.valor).toFixed(1)}`).join(" ");
 
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      className="h-auto w-full"
-      aria-label="Gráfico de aislamiento acústico por frecuencia"
-    >
-      {/* Grid lines */}
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" aria-label="Gráfico R(f)">
       {Y_TICKS.map((db) => (
         <g key={db}>
-          <line
-            x1={ML}
-            x2={W - MR}
-            y1={yPos(db)}
-            y2={yPos(db)}
-            stroke={db === 0 ? "#cbd5e1" : "#f1f5f9"}
-            strokeWidth={db === 0 ? 1 : 1}
-          />
-          <text
-            x={ML - 6}
-            y={yPos(db) + 4}
-            textAnchor="end"
-            fontSize={10}
-            fill="#94a3b8"
-          >
-            {db}
-          </text>
+          <line x1={ML} x2={W - MR} y1={yPos(db)} y2={yPos(db)} stroke={db === 0 ? "#cbd5e1" : "#f1f5f9"} strokeWidth={1} />
+          <text x={ML - 6} y={yPos(db) + 4} textAnchor="end" fontSize={10} fill="#94a3b8">{db}</text>
         </g>
       ))}
-
-      {/* Axes */}
       <line x1={ML} x2={ML} y1={MT} y2={H - MB} stroke="#cbd5e1" strokeWidth={1} />
       <line x1={ML} x2={W - MR} y1={H - MB} y2={H - MB} stroke="#cbd5e1" strokeWidth={1} />
-
-      {/* X-axis labels */}
       {FRECUENCIAS_CHART.map((hz) => (
-        <text
-          key={hz}
-          x={xPos(hz)}
-          y={H - MB + 14}
-          textAnchor="middle"
-          fontSize={9}
-          fill="#94a3b8"
-        >
+        <text key={hz} x={xPos(hz)} y={H - MB + 14} textAnchor="middle" fontSize={9} fill="#94a3b8">
           {abreviarFrecuencia(hz)}
         </text>
       ))}
-
-      {/* Axis titles */}
-      <text
-        x={ML - 32}
-        y={MT + innerH / 2}
-        textAnchor="middle"
-        fontSize={10}
-        fill="#64748b"
-        transform={`rotate(-90, ${ML - 32}, ${MT + innerH / 2})`}
-      >
-        R (dB)
-      </text>
-      <text x={ML + innerW / 2} y={H - 2} textAnchor="middle" fontSize={10} fill="#64748b">
-        Frecuencia (Hz)
-      </text>
-
-      {/* Data line */}
-      {linePath && (
-        <path d={linePath} fill="none" stroke="#2563eb" strokeWidth={2} strokeLinejoin="round" />
-      )}
-
-      {/* Data points */}
+      <text x={ML - 32} y={MT + innerH / 2} textAnchor="middle" fontSize={10} fill="#64748b" transform={`rotate(-90, ${ML - 32}, ${MT + innerH / 2})`}>R (dB)</text>
+      <text x={ML + innerW / 2} y={H - 2} textAnchor="middle" fontSize={10} fill="#64748b">Frecuencia (Hz)</text>
+      {linePath && <path d={linePath} fill="none" stroke="#2563eb" strokeWidth={2} strokeLinejoin="round" />}
       {data.map((p) => (
-        <circle
-          key={p.frecuencia}
-          cx={xPos(p.frecuencia)}
-          cy={yPos(p.valor)}
-          r={3}
-          fill="#2563eb"
-        />
+        <circle key={p.frecuencia} cx={xPos(p.frecuencia)} cy={yPos(p.valor)} r={3} fill="#2563eb" />
       ))}
-
-      {/* Empty state */}
       {data.length === 0 && (
-        <text
-          x={ML + innerW / 2}
-          y={MT + innerH / 2}
-          textAnchor="middle"
-          fontSize={12}
-          fill="#cbd5e1"
-        >
-          Sin datos
-        </text>
+        <text x={ML + innerW / 2} y={MT + innerH / 2} textAnchor="middle" fontSize={12} fill="#cbd5e1">Sin datos</text>
       )}
     </svg>
   );
 }
 
-function MetricaCard({
-  label,
-  value,
-}: {
-  label: string;
-  value: number | null;
-}): JSX.Element {
+// ─── TablaResultados ──────────────────────────────────────────────────────────
+
+function TablaResultados({ data }: { data: Array<{ frecuencia: number; valor: number }> }): JSX.Element {
+  if (data.length === 0) {
+    return (
+      <p className="py-4 text-center text-xs text-slate-400">Sin datos. Pulsa Calcular.</p>
+    );
+  }
+  return (
+    <div className="overflow-auto rounded-lg border border-slate-200">
+      <table className="w-full text-xs">
+        <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-400">
+          <tr>
+            <th className="px-3 py-1.5 text-right">Hz</th>
+            <th className="px-3 py-1.5 text-right">R (dB)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((row) => (
+            <tr key={row.frecuencia} className="border-t border-slate-100">
+              <td className="px-3 py-1 text-right tabular-nums text-ink">{row.frecuencia}</td>
+              <td className="px-3 py-1 text-right tabular-nums font-medium text-ink">{row.valor.toFixed(1)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── MetricaCard ──────────────────────────────────────────────────────────────
+
+function MetricaCard({ label, value }: { label: string; value: number | null }): JSX.Element {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 text-center">
       <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{label}</p>
@@ -325,77 +283,163 @@ function MetricaCard({
   );
 }
 
+// ─── CapaSection ─────────────────────────────────────────────────────────────
+
+function CapaSection({
+  title,
+  accent,
+  capas,
+  catalogo,
+  onAgregar,
+  onEliminar,
+  onCambiarMaterial,
+  onCambiarEspesor,
+  onCambiarCantidad,
+}: {
+  title: string;
+  accent: string;
+  capas: PanelLayer[];
+  catalogo: CatalogoMaterial[];
+  onAgregar: () => void;
+  onEliminar: (i: number) => void;
+  onCambiarMaterial: (i: number, nombre: string) => void;
+  onCambiarEspesor: (i: number, mm: number) => void;
+  onCambiarCantidad: (i: number, qty: number) => void;
+}): JSX.Element {
+  return (
+    <div className={`rounded-lg border-2 ${accent} p-3 space-y-2`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{title}</p>
+
+      {capas.length === 0 && (
+        <p className="rounded border border-dashed border-slate-200 p-2 text-center text-[10px] text-slate-400">
+          Sin materiales
+        </p>
+      )}
+
+      {capas.map((capa, i) => (
+        <div key={i} className="grid grid-cols-[1fr_44px_36px_auto] items-end gap-1.5">
+          <div>
+            {i === 0 && <p className="mb-0.5 text-[9px] text-slate-400">MATERIAL</p>}
+            <select
+              value={capa.nombre}
+              onChange={(e) => onCambiarMaterial(i, e.target.value)}
+              className="h-8 w-full rounded border border-slate-300 bg-white px-1.5 text-[10px] text-ink focus:border-signal focus:outline-none"
+            >
+              {catalogo.map((m) => (
+                <option key={m.nombre} value={m.nombre}>{m.nombre}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            {i === 0 && <p className="mb-0.5 text-[9px] text-slate-400">ESP (mm)</p>}
+            <input
+              type="number" min={1} max={999} step={1}
+              value={capa.espesorUnitarioMm}
+              onChange={(e) => onCambiarEspesor(i, parseInt(e.target.value) || 1)}
+              className="h-8 w-full rounded border border-slate-300 bg-white px-1 text-center text-[10px] text-ink focus:border-signal focus:outline-none"
+            />
+          </div>
+          <div>
+            {i === 0 && <p className="mb-0.5 text-[9px] text-slate-400">QTY</p>}
+            <input
+              type="number" min={1} max={10} step={1}
+              value={capa.cantidad}
+              onChange={(e) => onCambiarCantidad(i, parseInt(e.target.value) || 1)}
+              className="h-8 w-full rounded border border-slate-300 bg-white px-1 text-center text-[10px] text-ink focus:border-signal focus:outline-none"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => onEliminar(i)}
+            className="mb-0 h-8 rounded px-1 text-slate-400 hover:text-red-500"
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
+
+      <button
+        type="button"
+        onClick={onAgregar}
+        className="flex w-full items-center justify-center gap-1 rounded border border-dashed border-slate-300 py-1 text-[10px] text-slate-500 hover:border-signal hover:text-signal"
+      >
+        <Plus className="h-3 w-3" /> Añadir
+      </button>
+    </div>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 type CalculatorProps = { projectId?: string };
 
 export function Calculator({ projectId = "1" }: CalculatorProps = {}): JSX.Element {
-  const [catalogo, setCatalogo] = useState<CatalogoMaterial[]>(FALLBACK_MATERIALES);
-  const [capas, setCapas] = useState<CapaItem[]>([]);
+  const [catalogoRigido, setCatalogoRigido] = useState<CatalogoMaterial[]>(FALLBACK_RIGID);
+  const [catalogoRelleno, setCatalogoRelleno] = useState<CatalogoMaterial[]>(FALLBACK_FILLING);
+  const [capa1, setCapa1] = useState<PanelLayer[]>([]);
+  const [capa2, setCapa2] = useState<PanelLayer[]>([]);
+  const [union, setUnion] = useState<UnionConfig>({
+    rellenoNombre: null,
+    rellenoEspesorMm: 50,
+    camaraAireMm: 0,
+    tipoMontantes: "montantes_metal",
+  });
   const [resultado, setResultado] = useState<Resultado | null>(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Double-leaf (doble hoja) state
-  const [modoDoble, setModoDoble] = useState(false);
-  const [separacionMm, setSeparacionMm] = useState<number>(90);
-  const [tipoUnion, setTipoUnion] = useState<TipoUnion>("montantes_metal");
-  const [tieneRelleno, setTieneRelleno] = useState(false);
 
-  // Load full catalog from API
-  const cargarCatalogo = useCallback(async (): Promise<void> => {
+  // Load catalogs
+  const cargarCatalogos = useCallback(async (): Promise<void> => {
     try {
-      const res = await fetch(apiUrl("/api/materiales/"));
-      if (res.ok) {
-        const data = (await res.json()) as ApiMaterial[];
-        setCatalogo(data.map(normalizarMaterial));
-      }
-    } catch {
-      // fall back to static list
-    }
+      const [resR, resF] = await Promise.all([
+        fetch(apiUrl("/api/materiales/?categoria=rigid")),
+        fetch(apiUrl("/api/materiales/?categoria=filling")),
+      ]);
+      if (resR.ok) setCatalogoRigido(await resR.json() as CatalogoMaterial[]);
+      if (resF.ok) setCatalogoRelleno(await resF.json() as CatalogoMaterial[]);
+    } catch { /* fallback lists remain */ }
   }, []);
 
-  useEffect(() => { void cargarCatalogo(); }, [cargarCatalogo]);
+  useEffect(() => { void cargarCatalogos(); }, [cargarCatalogos]);
 
-  function agregarCapa(): void {
-    if (capas.length >= 8) return;
-    const primero = catalogo[0];
-    if (!primero) return;
-    setCapas((prev) => [
-      ...prev,
-      {
-        nombre: primero.nombre,
-        densidad: primero.densidad,
-        tipo: primero.tipo,
-        espesorMm: defaultEspesorMm(primero.nombre),
-      },
-    ]);
+  // ── Capa helpers ─────────────────────────────────────────────────────────
+
+  function buildDefaultLayer(cat: CatalogoMaterial[]): PanelLayer {
+    const m = cat[0] ?? FALLBACK_RIGID[0];
+    return { nombre: m.nombre, densidad: m.densidad, tipo: m.tipo, espesorUnitarioMm: defaultEspesorMm(m.nombre), cantidad: 1 };
+  }
+
+  function layerFromMaterial(nombre: string, cat: CatalogoMaterial[]): PanelLayer {
+    const m = cat.find((x) => x.nombre === nombre) ?? cat[0] ?? FALLBACK_RIGID[0];
+    return { nombre: m.nombre, densidad: m.densidad, tipo: m.tipo, espesorUnitarioMm: defaultEspesorMm(m.nombre), cantidad: 1 };
+  }
+
+  function agregar(set: React.Dispatch<React.SetStateAction<PanelLayer[]>>, cat: CatalogoMaterial[]): void {
+    set((prev) => { if (prev.length >= 6) return prev; return [...prev, buildDefaultLayer(cat)]; });
     setResultado(null);
   }
 
-  function eliminarCapa(index: number): void {
-    setCapas((prev) => prev.filter((_, i) => i !== index));
+  function eliminar(set: React.Dispatch<React.SetStateAction<PanelLayer[]>>, i: number): void {
+    set((prev) => prev.filter((_, idx) => idx !== i));
     setResultado(null);
   }
 
-  function cambiarMaterial(index: number, nombre: string): void {
-    const mat = catalogo.find((m) => m.nombre === nombre);
-    if (!mat) return;
-    setCapas((prev) =>
-      prev.map((c, i) =>
-        i === index
-          ? { nombre: mat.nombre, densidad: mat.densidad, tipo: mat.tipo, espesorMm: defaultEspesorMm(mat.nombre) }
-          : c
-      )
-    );
+  function cambiarMaterial(set: React.Dispatch<React.SetStateAction<PanelLayer[]>>, i: number, nombre: string, cat: CatalogoMaterial[]): void {
+    set((prev) => prev.map((c, idx) => idx === i ? layerFromMaterial(nombre, cat) : c));
     setResultado(null);
   }
 
-  function cambiarEspesor(index: number, mm: number): void {
-    setCapas((prev) =>
-      prev.map((c, i) => (i === index ? { ...c, espesorMm: Math.max(1, mm) } : c))
-    );
+  function cambiarEspesor(set: React.Dispatch<React.SetStateAction<PanelLayer[]>>, i: number, mm: number): void {
+    set((prev) => prev.map((c, idx) => idx === i ? { ...c, espesorUnitarioMm: Math.max(1, mm) } : c));
     setResultado(null);
   }
+
+  function cambiarCantidad(set: React.Dispatch<React.SetStateAction<PanelLayer[]>>, i: number, qty: number): void {
+    set((prev) => prev.map((c, idx) => idx === i ? { ...c, cantidad: Math.max(1, qty) } : c));
+    setResultado(null);
+  }
+
+  // ── Chart / table data ───────────────────────────────────────────────────
 
   const chartData = useMemo(() => {
     if (!resultado) return [];
@@ -404,24 +448,29 @@ export function Calculator({ projectId = "1" }: CalculatorProps = {}): JSX.Eleme
       .sort((a, b) => a.frecuencia - b.frecuencia);
   }, [resultado]);
 
+  // ── Calculation ───────────────────────────────────────────────────────────
+
   async function calcular(): Promise<void> {
-    if (capas.length === 0) return;
+    if (capa1.length === 0 && capa2.length === 0) return;
     setCargando(true);
     setError(null);
     try {
-      const res = await fetch(apiUrl("/api/calculations/"), {
+      const body = {
+        proyecto_id: Number(projectId) || 1,
+        nombre: "Calculo estructurado",
+        capa1: capa1.map((c) => ({ nombre: c.nombre, cantidad: c.cantidad, espesor_unitario_mm: c.espesorUnitarioMm })),
+        union: {
+          relleno_nombre: union.rellenoNombre || null,
+          relleno_espesor_mm: union.rellenoNombre ? union.rellenoEspesorMm : null,
+          camara_aire_mm: union.camaraAireMm,
+          tipo_montantes: union.tipoMontantes,
+        },
+        capa2: capa2.map((c) => ({ nombre: c.nombre, cantidad: c.cantidad, espesor_unitario_mm: c.espesorUnitarioMm })),
+      };
+      const res = await fetch(apiUrl("/api/calculations/structured/"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          proyecto_id: Number(projectId) || 1,
-          nombre: "Calculo acustico",
-          materiales: capas.map((c) => ({ nombre: c.nombre, espesor: c.espesorMm / 1000 })),
-          ...(modoDoble && capas.length === 2 && {
-            separacion_mm: separacionMm,
-            tipo_union: tipoUnion,
-            tiene_relleno: tieneRelleno,
-          }),
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`Error ${res.status}`);
       const data = (await res.json()) as { salida?: Resultado };
@@ -439,175 +488,110 @@ export function Calculator({ projectId = "1" }: CalculatorProps = {}): JSX.Eleme
     void calcular();
   }
 
-  const puedeCalcular = capas.length > 0 && !cargando;
+  const puedeCalcular = (capa1.length > 0 || capa2.length > 0) && !cargando;
+
+  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <form onSubmit={handleSubmit}>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[340px_1fr_1fr]">
 
         {/* ── Columna izquierda: Configurador ── */}
-        <div className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5">
+        <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4">
           <div>
-            <h2 className="text-base font-semibold text-ink">Configurador de Tabique</h2>
-            <p className="mt-0.5 text-xs text-slate-400">
-              Diseña y simula el aislamiento acústico multicapa.
+            <h2 className="text-sm font-semibold text-ink">Configurador de Tabique</h2>
+            <p className="mt-0.5 text-xs text-slate-400">Define capas rígidas y unión entre ellas.</p>
+          </div>
+
+          {/* Capa 1 */}
+          <CapaSection
+            title="Capa 1"
+            accent="border-slate-300"
+            capas={capa1}
+            catalogo={catalogoRigido}
+            onAgregar={() => agregar(setCapa1, catalogoRigido)}
+            onEliminar={(i) => eliminar(setCapa1, i)}
+            onCambiarMaterial={(i, n) => cambiarMaterial(setCapa1, i, n, catalogoRigido)}
+            onCambiarEspesor={(i, mm) => cambiarEspesor(setCapa1, i, mm)}
+            onCambiarCantidad={(i, q) => cambiarCantidad(setCapa1, i, q)}
+          />
+
+          {/* Unión */}
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-3 space-y-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              Unión entre capas
             </p>
-          </div>
 
-          {/* Sencillo / Doble toggle */}
-          <div className="flex rounded-lg border border-slate-200 p-0.5">
-            {(["Sencillo", "Doble"] as const).map((label) => {
-              const active = modoDoble === (label === "Doble");
-              return (
-                <button
-                  key={label}
-                  type="button"
-                  onClick={() => { setModoDoble(label === "Doble"); setResultado(null); }}
-                  className={`flex-1 rounded-md py-1.5 text-xs font-semibold transition ${
-                    active
-                      ? "bg-signal text-white shadow-sm"
-                      : "text-slate-500 hover:text-ink"
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+            {/* Relleno selector */}
+            <div>
+              <p className="mb-0.5 text-[9px] text-slate-400">RELLENO</p>
+              <select
+                value={union.rellenoNombre ?? ""}
+                onChange={(e) => { setUnion((u) => ({ ...u, rellenoNombre: e.target.value || null })); setResultado(null); }}
+                className="h-8 w-full rounded border border-slate-300 bg-white px-1.5 text-[10px] text-ink focus:border-signal focus:outline-none"
+              >
+                <option value="">Sin relleno (cámara de aire)</option>
+                {catalogoRelleno.map((m) => (
+                  <option key={m.nombre} value={m.nombre}>{m.nombre}</option>
+                ))}
+              </select>
+            </div>
 
-          {/* Union section — visible only in Doble mode */}
-          {modoDoble && (
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                Unión entre capas
-              </p>
-
-              <div className="grid grid-cols-[1fr_72px] gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              {union.rellenoNombre && (
                 <div>
-                  <p className="mb-1 text-[10px] text-slate-400">Tipo</p>
-                  <select
-                    value={tipoUnion}
-                    onChange={(e) => { setTipoUnion(e.target.value as TipoUnion); setResultado(null); }}
-                    className="h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-xs text-ink focus:border-signal focus:outline-none"
-                  >
-                    <option value="rigida">Rígida</option>
-                    <option value="montantes_metal">Montantes metal (Metalcon)</option>
-                    <option value="montantes_madera">Montantes madera</option>
-                    <option value="canal_resiliente">Canal resiliente</option>
-                    <option value="aire">Sin montantes (aire)</option>
-                  </select>
-                </div>
-                <div>
-                  <p className="mb-1 text-[10px] text-slate-400">Sep. (mm)</p>
+                  <p className="mb-0.5 text-[9px] text-slate-400">ESP. RELLENO (mm)</p>
                   <input
-                    type="number"
-                    min={10}
-                    max={500}
-                    step={5}
-                    value={separacionMm}
-                    onChange={(e) => { setSeparacionMm(parseInt(e.target.value) || 90); setResultado(null); }}
-                    className="h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-center text-xs text-ink focus:border-signal focus:outline-none"
+                    type="number" min={10} max={500} step={5}
+                    value={union.rellenoEspesorMm}
+                    onChange={(e) => { setUnion((u) => ({ ...u, rellenoEspesorMm: parseInt(e.target.value) || 50 })); setResultado(null); }}
+                    className="h-8 w-full rounded border border-slate-300 bg-white px-2 text-center text-[10px] text-ink focus:border-signal focus:outline-none"
                   />
                 </div>
-              </div>
-
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={tieneRelleno}
-                  onChange={(e) => { setTieneRelleno(e.target.checked); setResultado(null); }}
-                  className="h-3.5 w-3.5 accent-signal"
-                />
-                <span className="text-xs text-slate-600">Cavidad con lana mineral</span>
-              </label>
-
-              {capas.length !== 2 && (
-                <p className="text-[10px] text-amber-600">
-                  El modo Doble requiere exactamente 2 capas.
-                </p>
               )}
-            </div>
-          )}
-
-          {/* Layers */}
-          <div className="flex flex-col gap-3">
-            {capas.length === 0 && (
-              <p className="rounded-lg border border-dashed border-slate-200 p-4 text-center text-xs text-slate-400">
-                Pulsa &ldquo;+ Añadir Capa&rdquo; para empezar
-              </p>
-            )}
-
-            {capas.map((capa, i) => (
-              <div key={i} className="rounded-lg border border-slate-200 p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold text-ink">Capa {i + 1}</span>
-                  <button
-                    type="button"
-                    aria-label={`Eliminar capa ${i + 1}`}
-                    onClick={() => eliminarCapa(i)}
-                    className="rounded p-0.5 text-slate-400 transition hover:text-red-500"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-[1fr_72px] gap-2">
-                  <div>
-                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                      Material
-                    </p>
-                    <select
-                      value={capa.nombre}
-                      onChange={(e) => cambiarMaterial(i, e.target.value)}
-                      className="h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-xs text-ink focus:border-signal focus:outline-none"
-                    >
-                      {catalogo.map((m) => (
-                        <option key={m.nombre} value={m.nombre}>
-                          {m.nombre}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                      Esp. (mm)
-                    </p>
-                    <input
-                      type="number"
-                      min={1}
-                      max={999}
-                      step={1}
-                      value={capa.espesorMm}
-                      onChange={(e) => cambiarEspesor(i, parseInt(e.target.value) || 1)}
-                      className="h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-center text-xs text-ink focus:border-signal focus:outline-none"
-                    />
-                  </div>
-                </div>
+              <div>
+                <p className="mb-0.5 text-[9px] text-slate-400">CÁMARA AIRE (mm)</p>
+                <input
+                  type="number" min={0} max={500} step={5}
+                  value={union.camaraAireMm}
+                  onChange={(e) => { setUnion((u) => ({ ...u, camaraAireMm: parseInt(e.target.value) || 0 })); setResultado(null); }}
+                  className="h-8 w-full rounded border border-slate-300 bg-white px-2 text-center text-[10px] text-ink focus:border-signal focus:outline-none"
+                />
               </div>
-            ))}
+            </div>
+
+            {/* Tipo montantes */}
+            <div>
+              <p className="mb-0.5 text-[9px] text-slate-400">MONTANTES</p>
+              <select
+                value={union.tipoMontantes}
+                onChange={(e) => { setUnion((u) => ({ ...u, tipoMontantes: e.target.value })); setResultado(null); }}
+                className="h-8 w-full rounded border border-slate-300 bg-white px-1.5 text-[10px] text-ink focus:border-signal focus:outline-none"
+              >
+                {OPCIONES_MONTANTES.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          {/* Add layer button */}
-          {capas.length < 8 && (
-            <button
-              type="button"
-              onClick={agregarCapa}
-              className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-300 py-2 text-xs font-medium text-slate-500 transition hover:border-signal hover:text-signal"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Añadir Capa
-            </button>
-          )}
+          {/* Capa 2 */}
+          <CapaSection
+            title="Capa 2"
+            accent="border-slate-300"
+            capas={capa2}
+            catalogo={catalogoRigido}
+            onAgregar={() => agregar(setCapa2, catalogoRigido)}
+            onEliminar={(i) => eliminar(setCapa2, i)}
+            onCambiarMaterial={(i, n) => cambiarMaterial(setCapa2, i, n, catalogoRigido)}
+            onCambiarEspesor={(i, mm) => cambiarEspesor(setCapa2, i, mm)}
+            onCambiarCantidad={(i, q) => cambiarCantidad(setCapa2, i, q)}
+          />
 
-          {/* Error */}
           {error && (
-            <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">
-              {error}
-            </p>
+            <p className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{error}</p>
           )}
 
-          {/* Calculate button */}
           <button
             type="submit"
             disabled={!puedeCalcular}
@@ -621,20 +605,27 @@ export function Calculator({ projectId = "1" }: CalculatorProps = {}): JSX.Eleme
         <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-5">
           <h2 className="text-sm font-semibold text-ink">Esquema Tabique</h2>
           <div className="flex flex-1 items-center justify-center">
-            <EsquemaTabique capas={capas} />
+            <EsquemaTabique capa1={capa1} union={union} capa2={capa2} />
           </div>
         </div>
 
-        {/* ── Columna derecha: Gráfico + métricas ── */}
+        {/* ── Columna derecha: Gráfico + tabla + métricas ── */}
         <div className="flex flex-col gap-4">
           <div className="rounded-xl border border-slate-200 bg-white p-5">
-            <h2 className="mb-3 text-sm font-semibold text-ink">Aislamiento Acústico R</h2>
+            <h2 className="mb-2 text-sm font-semibold text-ink">Aislamiento Acústico R</h2>
             <GraficoR data={chartData} />
           </div>
 
+          <div className="rounded-xl border border-slate-200 bg-white p-4">
+            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Espectro R(f) — tercios de octava
+            </h2>
+            <TablaResultados data={chartData} />
+          </div>
+
           <div className="grid grid-cols-3 gap-3">
-            <MetricaCard label="Rw" value={resultado?.Rw ?? null} />
-            <MetricaCard label="C" value={resultado?.C ?? null} />
+            <MetricaCard label="Rw"  value={resultado?.Rw  ?? null} />
+            <MetricaCard label="C"   value={resultado?.C   ?? null} />
             <MetricaCard label="Ctr" value={resultado?.Ctr ?? null} />
           </div>
         </div>

@@ -176,6 +176,122 @@ class AcousticEngine:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    # ── Structured Capa1 + Unión + Capa2 ─────────────────────────────────────
+
+    def calcular_aislamiento_estructurado(
+        self,
+        capa1: list[MaterialInput],
+        union: dict[str, object],
+        capa2: list[MaterialInput],
+        frecuencias: list[float] | None = None,
+    ) -> dict[float, float]:
+        """Calculate R(f) for a Capa1 + Unión + Capa2 wall assembly.
+
+        Each capa is a list of ``{nombre, cantidad, espesor_unitario_mm}`` dicts.
+        Multiple boards on the same side are combined into one equivalent panel
+        (surface masses add, elastic constants from the dominant layer).
+
+        The union dict keys:
+            relleno_nombre      – filling material name (optional)
+            relleno_espesor_mm  – filling thickness in mm (optional)
+            camara_aire_mm      – extra air gap in mm (default 0)
+            tipo_montantes      – stud coupling type (default "montantes_metal")
+
+        Falls back to single-wall Sharp when only one side is defined or when
+        the total cavity depth is zero.
+        """
+        try:
+            bandas = self._validar_frecuencias(frecuencias or generar_frecuencias_estandar())
+
+            if not capa1 and not capa2:
+                raise CalculationError("Debe definir al menos una capa.")
+
+            # Union parameters
+            relleno_nombre = union.get("relleno_nombre")
+            relleno_mm = float(union.get("relleno_espesor_mm") or 0)
+            camara_mm = float(union.get("camara_aire_mm") or 0)
+            tipo_montantes = str(union.get("tipo_montantes") or "montantes_metal")
+            separacion_m = (relleno_mm + camara_mm) / 1000.0
+            tiene_relleno = bool(relleno_nombre and relleno_mm > 0)
+
+            # ── Double-leaf (both panels + cavity) ──────────────────────────
+            if capa1 and capa2 and separacion_m > 0:
+                panel1 = self._crear_capa_equivalente(capa1)
+                panel2 = self._crear_capa_equivalente(capa2)
+                return {
+                    f: calcular_r_doble_hoja(
+                        panel1, panel2, separacion_m, tipo_montantes, tiene_relleno, f
+                    )
+                    for f in bandas
+                }
+
+            # ── Both sides but no cavity: single equivalent wall ────────────
+            if capa1 and capa2:
+                equiv = self._crear_capa_equivalente(list(capa1) + list(capa2))
+                return {f: calcular_r_sharp(equiv, f) for f in bandas}
+
+            # ── Single side only ─────────────────────────────────────────────
+            items = capa1 or capa2
+            equiv = self._crear_capa_equivalente(items)
+            return {f: calcular_r_sharp(equiv, f) for f in bandas}
+
+        except MaterialNotFoundError:
+            raise
+        except (CalculationError, SharpCalculationError) as exc:
+            raise CalculationError(str(exc)) from exc
+        except Exception as exc:
+            raise CalculationError(f"Error en calculo estructurado: {exc}") from exc
+
+    def _crear_capa_equivalente(self, items: list[MaterialInput]) -> Material:
+        """Combine multiple bonded boards into one equivalent panel.
+
+        Surface masses add linearly.  Elastic constants come from the board
+        with the highest surface mass (dominant contributor to bending stiffness).
+        Loss factor is surface-mass-weighted average.
+        """
+        layers: list[tuple[Material, float]] = []
+        for item in items:
+            nombre = str(item.get("nombre", "")).strip()
+            cantidad = int(item.get("cantidad", 1))
+            espesor_mm = float(item.get("espesor_unitario_mm") or item.get("espesor", 0))
+            if espesor_mm <= 0:
+                raise CalculationError(f"Espesor invalido para '{nombre}'.")
+            espesor_total = espesor_mm / 1000.0 * cantidad
+            try:
+                base = self.libreria.buscar_por_nombre(nombre)
+            except KeyError as exc:
+                raise MaterialNotFoundError(f"Material no encontrado: {nombre}") from exc
+            layers.append((base, espesor_total))
+
+        if len(layers) == 1:
+            mat, esp = layers[0]
+            return Material(
+                nombre=mat.nombre,
+                densidad=mat.densidad,
+                factor_perdida=mat.factor_perdida,
+                tipo=mat.tipo if mat.tipo != "poroso" else "rigido",
+                espesor=esp,
+                modulo_young=mat.modulo_young,
+                coef_poisson=mat.coef_poisson,
+            )
+
+        m_total = sum(mat.densidad * esp for mat, esp in layers)
+        h_total = sum(esp for _, esp in layers)
+        densidad_equiv = m_total / h_total
+        dominant = max(layers, key=lambda x: x[0].densidad * x[1])
+        fp_equiv = (
+            sum(mat.factor_perdida * mat.densidad * esp for mat, esp in layers) / m_total
+        )
+        return Material(
+            nombre="_equiv",
+            densidad=densidad_equiv,
+            factor_perdida=min(max(fp_equiv, 0.001), 0.99),
+            tipo="rigido",
+            espesor=h_total,
+            modulo_young=dominant[0].modulo_young,
+            coef_poisson=dominant[0].coef_poisson,
+        )
+
     def _crear_capa(self, material_input: MaterialInput) -> Material:
         nombre = str(material_input.get("nombre", "")).strip()
         if not nombre:

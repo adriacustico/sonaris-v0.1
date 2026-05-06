@@ -22,16 +22,20 @@ from engine.materials import Material
 
 
 _C_AIRE = 343.0
-_ESPACIADO_STUD_M = 0.6   # 600 mm — typical stud spacing used in the stud formula
+_ESPACIADO_STUD_M = 0.6   # 600 mm — typical stud spacing
 
-# Stud-path constants (calibrated, Sharp model):
-#   R_stud = 20·log10(f · S) + C_stud
-# where S = stud spacing in metres.
-# Calibrated so that a single 15 mm gypsum panel (m=12.75 kg/m²) each side
-# on 90 mm Metalcon studs gives Rw ≈ 40 dB, and wood studs ≈ 33 dB.
-_C_STUD: dict[str, float] = {
-    "montantes_metal":   -14.0,   # light-gauge steel C-stud (Metalcon)
-    "montantes_madera":  -22.0,   # 38×90 mm wood stud (more coupling)
+# Stud-path constants — Davy mass-dependent formula:
+#   R_stud = 20·log10(f · S · m1 · m2) + C_abs
+#
+# Including panel masses (m1·m2 term) ensures that heavier walls give better
+# stud resistance, avoiding the artefact where R_stud ≤ R_single-wall when
+# both sides carry multiple boards.
+#
+# Calibrated so that 1×Placa-yeso-15mm each side + 90 mm Metalcon gives
+# Rw ≈ 40–43 dB, matching typical field measurements.
+_C_STUD_ABS: dict[str, float] = {
+    "montantes_metal":   -58.0,   # light-gauge steel C-stud (Metalcon)
+    "montantes_madera":  -65.0,   # 38×90 mm wood stud (more coupling)
 }
 
 TIPOS_UNION_VALIDOS = frozenset({
@@ -151,9 +155,12 @@ def calcular_r_doble_hoja(
     if tipo in {"canal_resiliente", "aire"}:
         return round(max(r_sw, R_air), 1)
 
-    # ── Stud path (Sharp line-bridge formula) ────────────────────────────────
-    C_stud = _C_STUD.get(tipo, -14.0)
-    R_stud = 20.0 * log10_seguro(frecuencia * _ESPACIADO_STUD_M) + C_stud
+    # ── Stud path (Davy mass-dependent formula) ──────────────────────────────
+    # R_stud = 20·log10(f · S · m1 · m2) + C_abs
+    # Panel mass product ensures heavier assemblies get better stud resistance,
+    # preventing the single-wall shortcut from dominating on multi-board walls.
+    C_stud = _C_STUD_ABS.get(tipo, -58.0)
+    R_stud = 20.0 * log10_seguro(frecuencia * _ESPACIADO_STUD_M * m1 * m2) + C_stud
 
     # Combine air and stud transmission paths in parallel
     tau_air  = 10.0 ** (-R_air  / 10.0)

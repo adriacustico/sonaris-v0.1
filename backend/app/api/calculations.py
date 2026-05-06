@@ -21,6 +21,60 @@ router = APIRouter()
 engine = AcousticEngine()
 
 
+# ── Structured (Capa1 + Unión + Capa2) schemas ────────────────────────────────
+
+class CapaMaterialStructInput(BaseModel):
+    """One material entry inside a structural panel layer."""
+
+    nombre: str
+    cantidad: int = Field(1, ge=1, le=20, description="Number of identical boards stacked")
+    espesor_unitario_mm: float = Field(..., gt=0, description="Thickness of each board in mm")
+
+
+class UnionStructInput(BaseModel):
+    """Cavity / union between both panels."""
+
+    relleno_nombre: str | None = Field(None, description="Filling material name (poroso)")
+    relleno_espesor_mm: float | None = Field(None, gt=0)
+    camara_aire_mm: float = Field(0, ge=0, description="Additional air-gap depth in mm")
+    tipo_montantes: str = Field("montantes_metal", description="Stud coupling type")
+
+
+class StructuredCalculationRequest(BaseModel):
+    """Full structured Capa1 + Unión + Capa2 request."""
+
+    proyecto_id: int
+    nombre: str
+    capa1: list[CapaMaterialStructInput] = []
+    union: UnionStructInput = UnionStructInput()
+    capa2: list[CapaMaterialStructInput] = []
+    frecuencias: list[float] | None = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "proyecto_id": 1,
+                "nombre": "Tabique Metalcon ejemplo",
+                "capa1": [
+                    {"nombre": "Placa yeso 15mm", "cantidad": 2, "espesor_unitario_mm": 15},
+                    {"nombre": "OSB 15mm", "cantidad": 1, "espesor_unitario_mm": 15},
+                ],
+                "union": {
+                    "relleno_nombre": "Lana mineral 50mm",
+                    "relleno_espesor_mm": 100,
+                    "camara_aire_mm": 0,
+                    "tipo_montantes": "montantes_metal",
+                },
+                "capa2": [
+                    {"nombre": "OSB 15mm", "cantidad": 1, "espesor_unitario_mm": 15},
+                ],
+            }
+        }
+    }
+
+
+# ── Legacy flat-list schemas ───────────────────────────────────────────────────
+
 class MaterialInput(BaseModel):
     """Material layer sent by the client."""
 
@@ -160,6 +214,67 @@ def delete_calculation(calculation_id: int, db: Session = Depends(get_db)) -> Re
     calc.eliminado = True
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/structured/", response_model=CalculationResponse, status_code=status.HTTP_201_CREATED)
+def create_structured_calculation(
+    req: StructuredCalculationRequest, db: Session = Depends(get_db)
+) -> CalculationResponse:
+    """Create a calculation using the Capa1 + Unión + Capa2 model."""
+    logger.info("POST /calculations/structured: %s", req.nombre)
+    try:
+        capa1 = [c.model_dump() for c in req.capa1]
+        union = req.union.model_dump()
+        capa2 = [c.model_dump() for c in req.capa2]
+
+        R_frecuencias = engine.calcular_aislamiento_estructurado(
+            capa1=capa1,
+            union=union,
+            capa2=capa2,
+            frecuencias=req.frecuencias,
+        )
+        ponderacion = engine.ponderacion_iso717_1(R_frecuencias)
+        resultado = {**ponderacion, "R_frecuencias": R_frecuencias}
+
+        entrada_json = json.dumps(
+            {"structured": True, **req.model_dump()}, ensure_ascii=False
+        )
+        calc = Calculation(
+            proyecto_id=req.proyecto_id,
+            nombre=req.nombre,
+            entrada_json=entrada_json,
+            resultado_json=json.dumps(resultado, ensure_ascii=False),
+            timestamp=datetime.utcnow(),
+        )
+        db.add(calc)
+        db.commit()
+        db.refresh(calc)
+
+        # Re-use the flat CalculationRequest wrapper for the response schema
+        entrada_flat = CalculationRequest(
+            proyecto_id=req.proyecto_id,
+            nombre=req.nombre,
+            materiales=[],
+        )
+        return CalculationResponse(
+            id=calc.id,
+            proyecto_id=calc.proyecto_id,
+            nombre=calc.nombre,
+            entrada=entrada_flat,
+            salida=resultado,
+            timestamp=calc.timestamp,
+        )
+    except MaterialNotFoundError as exc:
+        logger.error("Material invalido: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CalculationError as exc:
+        logger.error("Calculo estructurado fallido: %s", exc)
+        raise HTTPException(status_code=500, detail="Error en calculo") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error inesperado structured: %s", exc)
+        raise HTTPException(status_code=500, detail="Error interno") from exc
 
 
 def _to_response(calc: Calculation) -> CalculationResponse:

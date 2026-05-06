@@ -103,6 +103,11 @@ class Material:
     def __repr__(self) -> str:
         return f"Material(nombre='{self.nombre}', ρ={self.densidad:g} kg/m³)"
 
+    @property
+    def categoria(self) -> str:
+        """UI category: 'filling' for cavity absorbers, 'rigid' for structural panels."""
+        return "filling" if self.tipo == "poroso" else "rigid"
+
     def to_dict(self) -> MaterialDict:
         """Serialize material properties for API responses or UI lists."""
         return {
@@ -111,6 +116,7 @@ class Material:
             "espesor": self.espesor,
             "factor_perdida": self.factor_perdida,
             "tipo": self.tipo,
+            "categoria": self.categoria,
         }
 
     @staticmethod
